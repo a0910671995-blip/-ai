@@ -1,210 +1,242 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { 
+  TrendingUp, RefreshCw, Search, Target, Wallet, 
+  BarChart2, LineChart, ChevronRight, Globe, 
+  ArrowUpRight, ArrowDownRight, Trash2
+} from 'lucide-react';
 
-// --- 進階 100% 繞過 CORS 的跨域代理 ---
-const proxyUrl = "https://api.allorigins.win/get?url=";
+// ==========================================
+// 1. 核心引擎：技術指標計算 (移植自你的 Github)
+// ==========================================
+const calculateIndicators = (klines) => {
+  if (!klines || klines.length === 0) return [];
+  const closePrices = klines.map(k => k.close);
+  const result = [];
+  
+  for (let i = 0; i < klines.length; i++) {
+    let ma5 = i >= 4 ? closePrices.slice(i-4, i+1).reduce((a,b)=>a+b)/5 : null;
+    let ma20 = i >= 19 ? closePrices.slice(i-19, i+1).reduce((a,b)=>a+b)/20 : null;
+    result.push({ ...klines[i], ma5, ma20 });
+  }
+  return result;
+};
 
-const App = () => {
-  // 1. 狀態管理 (LocalStorage 儲存版)
+// ==========================================
+// 2. 輔助函數
+// ==========================================
+const formatPrice = (p) => parseFloat(p).toFixed(2);
+
+// ==========================================
+// 3. 主程式入口
+// ==========================================
+export default function App() {
   const [stocks, setStocks] = useState(() => {
-    const saved = localStorage.getItem('smc_ultra_v16');
+    const saved = localStorage.getItem('smc_v17_account');
     return saved ? JSON.parse(saved) : [];
   });
-
-  const [form, setForm] = useState({ symbol: '', price: '', qty: '' });
+  
+  const [marketData, setMarketData] = useState({}); // 存放即時股價
+  const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
-  const [globalStatus, setGlobalStatus] = useState("系統就緒 - 即時報價連線中");
 
-  // 2. 自動儲存
+  // 持久化儲存
   useEffect(() => {
-    localStorage.setItem('smc_ultra_v16', JSON.stringify(stocks));
+    localStorage.setItem('smc_v17_account', JSON.stringify(stocks));
   }, [stocks]);
 
-  // --- 關鍵核心：自動抓取 Yahoo 即時報價 ---
+  // --- 核心功能：抓取即時股價 (FinMind API) ---
   const fetchLivePrice = useCallback(async (symbol) => {
+    const TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wNC0wNiAxODoyOToxNSIsInVzZXJfaWQiOiJ0aW5nMDkwMiIsImVtYWlsIjoiYTA5MTA2NzE5OTVAZ21haWwuY29tIiwiaXAiOiIxMjMuMjA0LjE5OC4xMDgifQ._aQwOaw9SopLidA7fEgZzAY02nyPX6jLudW6_TwODMA";
     try {
-      // 在背景自动帮台股加上 .TW 后缀
-      const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}.TW`;
-      const response = await fetch(`${proxyUrl}${encodeURIComponent(yahooUrl)}`);
-      
-      if (!response.ok) return null;
-      
-      const resData = await response.json();
-      const rawContents = JSON.parse(resData.contents);
-      
-      if (rawContents.chart && rawContents.chart.result) {
-        return rawContents.chart.result[0].meta.regularMarketPrice;
+      const res = await fetch(`https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${symbol}&token=${TOKEN}`);
+      const json = await res.json();
+      if (json.data && json.data.length > 0) {
+        return json.data[json.data.length - 1].close;
       }
       return null;
-    } catch (e) {
-      console.error(`無法獲取 ${symbol} 即時報價:`, e);
-      return null;
-    }
+    } catch (e) { return null; }
   }, []);
 
-  // --- 關鍵核心：背景自动更新 (每 10 秒) ---
+  // 背景自動更新行情 (每 15 秒)
   useEffect(() => {
-    if (stocks.length === 0) return;
-    
-    setGlobalStatus("🔄 正在更新即時行情...");
-    const timer = setInterval(async () => {
-      const updatedStocks = await Promise.all(stocks.map(async (s) => {
-        const p = await fetchLivePrice(s.symbol);
-        if (p) {
-          return { ...s, live: p, lastUpdate: new Date().toLocaleTimeString() };
-        }
-        return s;
-      }));
-      setStocks(updatedStocks);
-      setGlobalStatus(`✅ 行情已更新 (${new Date().toLocaleTimeString()})`);
-    }, 10000); // 10秒更新一次，兼顾即时性与请求频率
-
+    const updateMarket = async () => {
+      const symbols = [...new Set(stocks.map(s => s.symbol))];
+      const newPrices = { ...marketData };
+      for (let sym of symbols) {
+        const p = await fetchLivePrice(sym);
+        if (p) newPrices[sym] = p;
+      }
+      setMarketData(newPrices);
+    };
+    if (stocks.length > 0) updateMarket();
+    const timer = setInterval(updateMarket, 15000);
     return () => clearInterval(timer);
   }, [stocks, fetchLivePrice]);
 
-  // 3. 新增監控標的
+  // --- 功能：建立標的 ---
   const addNewStock = async () => {
-    if (!form.symbol || !form.price || !form.qty) return alert("欄位不能空白");
-    const cost = parseFloat(form.price);
-    const qty = parseInt(form.qty);
-    const sym = form.symbol.toUpperCase();
+    const sym = searchTerm.toUpperCase();
+    const price = prompt(`${sym} 買入價格?`);
+    const qty = prompt(`${sym} 買入股數?`);
+    
+    if (!price || !qty) return;
 
     setLoading(true);
-    setGlobalStatus(`🔍 正在驗證 ${sym} 代碼...`);
+    const liveP = await fetchLivePrice(sym);
     
-    // 建立時先抓一次價格驗證
-    const p = await fetchLivePrice(sym);
-
-    if (p === null) {
-      alert(`找不到 [${sym}] 代碼。台股請確認代碼無誤，無需加 .TW (例如: 2313)`);
-      setLoading(false);
-      setGlobalStatus("❌ 驗證失敗");
-      return;
-    }
-
-    setStocks([...stocks, {
+    const newStock = {
       id: Date.now(),
       symbol: sym,
-      name: sym, // 由於移除 Token，預設顯示代碼
-      avgCost: cost, // 初始均價
-      qty: qty,       // 持股股數
-      live: p,         // 自動抓到的即時價
-      profit: 0,       // 已實現損益
-      chip: null,      // 籌碼資料 (留出整合空間)
-      lastUpdate: new Date().toLocaleTimeString()
-    }]);
+      avgCost: parseFloat(price),
+      qty: parseInt(qty),
+      realizedProfit: 0,
+      live: liveP || parseFloat(price)
+    };
 
-    setForm({ symbol: '', price: '', qty: '' });
+    setStocks([...stocks, newStock]);
+    setMarketData({ ...marketData, [sym]: liveP || price });
     setLoading(false);
-    setGlobalStatus("✅ 策略建立成功，自動監控中");
+    setSearchTerm('');
   };
 
-  // --- 功能 2：動態成本計算 (低位回補 - 攤平) ---
-  const handleBuyMore = (id, buyP, buyQ) => {
-    if (!buyP || !buyQ) return;
+  // --- 功能：賣出 (實現損益) ---
+  const handleSell = (id, p, q) => {
     setStocks(stocks.map(s => {
       if (s.id === id) {
-        const totalCost = (s.avgCost * s.qty) + (buyP * buyQ);
-        const newQty = s.qty + buyQ;
-        // 自动计算新的加权均价
-        const newAvg = parseFloat((totalCost / newQty).toFixed(2));
-        return { ...s, qty: newQty, avgCost: newAvg };
+        const profit = (p - s.avgCost) * q * 0.995;
+        return { ...s, qty: s.qty - q, realizedProfit: s.realizedProfit + profit };
       }
       return s;
     }));
   };
 
-  // --- 功能 3：已實現損益 (賣出結利) ---
-  const handleSell = (id, sellP, sellQ) => {
-    if (!sellP || !sellQ) return;
+  // --- 功能：回補 (重新計成本) ---
+  const handleBuyMore = (id, p, q) => {
     setStocks(stocks.map(s => {
       if (s.id === id) {
-        if (sellQ > s.qty) { alert("庫存不足"); return s; }
-        // 计算这一笔的实现损益
-        const tradeProfit = (sellP - s.avgCost) * sellQ;
-        return { ...s, qty: s.qty - sellQ, profit: s.profit + tradeProfit };
+        const totalCost = (s.avgCost * s.qty) + (p * q);
+        const newQty = s.qty + q;
+        return { ...s, qty: newQty, avgCost: totalCost / newQty };
       }
       return s;
     }));
-  };
-
-  // 4. SMC 深色 UI 樣式
-  const styles = {
-    container: { maxWidth: '500px', margin: '0 auto', padding: '20px', backgroundColor: '#0b0e11', color: '#eaecef', minHeight: '100vh', fontFamily: 'sans-serif' },
-    status: { textAlign: 'center', color: '#f0b90b', background: 'rgba(240, 185, 11, 0.1)', padding: '8px', borderRadius: '6px', marginBottom: '20px', fontSize: '0.9em' },
-    inputPanel: { backgroundColor: '#161a1e', padding: '15px', borderRadius: '12px', border: '1px solid #2b3139', marginBottom: '20px' },
-    input: { backgroundColor: '#2b3139', border: '1px solid #474d57', color: 'white', padding: '10px', borderRadius: '4px', width: '85%', marginBottom: '8px' },
-    btnAdd: { width: '100%', padding: '12px', backgroundColor: '#f0b90b', color: '#1e2329', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' },
-    card: { backgroundColor: '#161a1e', border: '1px solid #2b3139', borderRadius: '12px', padding: '15px', marginBottom: '20px', borderTop: '4px solid #f0b90b', position: 'relative' },
-    livePrice: { fontSize: '1.6em', fontWeight: 'bold', color: '#f6465d' },
-    dataGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', background: '#1e2329', padding: '12px', borderRadius: '8px', textAlign: 'center', marginTop: '10px', fontSize: '0.85em' },
-    tradeBtn: { border: 'none', borderRadius: '4px', padding: '6px 12px', color: 'white', cursor: 'pointer', fontWeight: 'bold' }
   };
 
   return (
-    <div style={styles.container}>
-      <h2 style={{ textAlign: 'center', letterSpacing: '1px', marginBottom: '20px' }}>📈 SMC ULTRA PRO v16</h2>
-      <div style={styles.status}>{globalStatus}</div>
-
-      {/* 輸入區 */}
-      <div style={styles.inputPanel}>
-        <input name="symbol" placeholder="代碼 (2313)" style={styles.input} value={form.symbol} onChange={e=>setForm({...form, symbol:e.target.value})} />
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-          <input name="price" type="number" placeholder="買入價" style={styles.input} value={form.price} onChange={e=>setForm({...form, price:e.target.value})} />
-          <input name="qty" type="number" placeholder="數量" style={styles.input} value={form.qty} onChange={e=>setForm({...form, qty:e.target.value})} />
+    <div className="min-h-screen bg-[#0b0e14] text-slate-100 font-sans p-4">
+      {/* Header */}
+      <header className="max-w-6xl mx-auto flex justify-between items-center mb-8 border-b border-[#2a2f3a] pb-4">
+        <div className="flex items-center gap-2">
+          <Globe className="w-8 h-8 text-blue-400" />
+          <h1 className="text-2xl font-black tracking-tighter">SMC STOCK PRO</h1>
         </div>
-        <button style={styles.btnAdd} onClick={addNewStock} disabled={loading}>{loading ? "搜尋中..." : "建立即時監控策略"}</button>
-      </div>
+        <div className="bg-[#121620] px-4 py-2 rounded-xl border border-[#2a2f3a] flex items-center gap-3">
+          <Wallet className="w-5 h-5 text-blue-400" />
+          <span className="font-mono font-bold">${stocks.reduce((a, b) => a + (marketData[b.symbol] || b.live) * b.qty, 0).toLocaleString()}</span>
+        </div>
+      </header>
 
-      {/* 列表區 */}
-      {stocks.map(s => {
-        // 未实现損益计算 = (现价 - 均价) * 持股数
-        const unrealized = Math.round((s.live - s.avgCost) * s.qty);
-        
-        return (
-          <div key={s.id} style={styles.card}>
-            <button onClick={()=>{if(window.confirm("結案？"))setStocks(stocks.filter(x=>x.id!==s.id))}} style={{position:'absolute',top:10,right:10,background:'none',border:'none',color:'#333',cursor:'pointer'}}>刪除</button>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: '1.2em' }}><b>{s.symbol}</b> <small style={{color:'#666'}}>台股</small></span>
-              <span style={styles.livePrice}>{s.live}</span>
-            </div>
-
-            {/* 籌碼預留區 */}
-            <div style={{ background: '#1e2323', padding: '5px 10px', borderRadius: '4px', fontSize: '0.75em', color: '#aaa', margin: '10px 0' }}>
-              SMC MAX 籌碼掃描中... [昨日法人：-- 張]
-            </div>
-
-            {/* 核心損益 */}
-            <div style={{ marginTop: '10px', textAlign: 'center' }}>
-              未實現：<b style={{ color: unrealized >= 0 ? '#f6465d' : '#0ecb81', fontSize: '1.3em' }}>{unrealized}</b>
-            </div>
-
-            {/* 專業數據網格 */}
-            <div style={styles.dataGrid}>
-              <div><small style={{color: '#848e9c'}}>均價</small><br/><b>{s.avgCost}</b></div>
-              <div><small style={{color: '#848e9c'}}>持股</small><br/><b>{s.qty}</b></div>
-              <div><small style={{color: '#848e9c'}}>本金</small><br/><b>{Math.round(s.avgCost * s.qty)}</b></div>
-              <div><small style={{color: '#848e9c'}}>已領</small><br/><b style={{color:'#f6465d'}}>{Math.round(s.profit)}</b></div>
-            </div>
-
-            {/* 進階操作區 */}
-            <div style={{ display: 'flex', gap: '8px', marginTop: '15px', borderTop: '1px dashed #2b3139', paddingTop: '15px' }}>
-              <button onClick={() => {
-                const p = prompt(`${s.symbol} 賣出成交價?`, s.live);
-                const q = prompt(`賣出股數? (持股 ${s.qty})`);
-                if(p && q) handleSell(s.id, parseFloat(p), parseInt(q));
-              }} style={{ ...styles.tradeBtn, backgroundColor: '#f6465d', flex: 1 }}>賣出結利</button>
-              <button onClick={() => {
-                const p = prompt(`${s.symbol} 回補成交價?`, s.live);
-                const q = prompt(`回補股數?`);
-                if(p && q) handleBuyMore(s.id, parseFloat(p), parseInt(q));
-              }} style={{ ...styles.tradeBtn, backgroundColor: '#3498db', flex: 1 }}>低位回補</button>
-            </div>
-            <div style={{textAlign:'right', fontSize:'0.7em', color:'#444', marginTop:10}}>⏱ 價格更新：${s.lastUpdate}</div>
+      <main className="max-w-6xl mx-auto">
+        {/* Search Panel */}
+        <div className="bg-[#121620] p-6 rounded-2xl border border-[#2a2f3a] shadow-xl mb-8 flex gap-4">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-3.5 h-5 w-5 text-slate-500" />
+            <input 
+              type="text" 
+              placeholder="搜尋或輸入台股代號 (如: 2313)" 
+              className="w-full pl-10 pr-4 py-3 bg-[#0b0e14] border border-[#2a2f3a] rounded-xl outline-none focus:border-blue-500 transition-all"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
           </div>
-        );
-      })}
+          <button 
+            onClick={addNewStock}
+            disabled={loading || !searchTerm}
+            className="bg-blue-600 hover:bg-blue-500 px-8 py-3 rounded-xl font-bold transition-all disabled:opacity-50"
+          >
+            {loading ? '分析中...' : '建立計畫'}
+          </button>
+        </div>
+
+        {/* Stock List */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {stocks.map(s => {
+            const currentP = marketData[s.symbol] || s.live;
+            const unrealized = Math.round((currentP - s.avgCost) * s.qty);
+            const isProfit = unrealized >= 0;
+            const tp = (s.avgCost * 1.1).toFixed(2);
+            const sl = (s.avgCost * 0.93).toFixed(2);
+
+            return (
+              <div key={s.id} className="bg-[#121620] border border-[#2a2f3a] rounded-2xl p-6 shadow-lg relative overflow-hidden group">
+                <div className={`absolute top-0 left-0 w-1 h-full ${isProfit ? 'bg-[#f6465d]' : 'bg-[#0ecb81]'}`} />
+                
+                <div className="flex justify-between items-start mb-6">
+                  <div>
+                    <h3 className="text-2xl font-black text-white">{s.symbol}</h3>
+                    <span className="text-xs text-slate-500">SMC 波段自動監控中</span>
+                  </div>
+                  <div className="text-right">
+                    <div className={`text-3xl font-mono font-bold ${isProfit ? 'text-[#f6465d]' : 'text-[#0ecb81]'}`}>
+                      {currentP}
+                    </div>
+                    <div className="text-xs text-slate-500">即時報價 (Yahoo/FinMind)</div>
+                  </div>
+                </div>
+
+                {/* 紀律區 */}
+                <div className="grid grid-cols-3 gap-3 mb-6">
+                  <div className="bg-[#0b0e14] p-3 rounded-xl border border-[#1e2330] text-center">
+                    <span className="text-[10px] text-slate-500 block mb-1">停利目標 (+10%)</span>
+                    <span className="text-lg font-bold text-red-400">{tp}</span>
+                  </div>
+                  <div className="bg-[#0b0e14] p-3 rounded-xl border border-[#1e2330] text-center">
+                    <span className="text-[10px] text-slate-500 block mb-1">低位回補參考</span>
+                    <span className="text-lg font-bold text-blue-400">{(tp * 0.95).toFixed(2)}</span>
+                  </div>
+                  <div className="bg-[#0b0e14] p-3 rounded-xl border border-[#1e2330] text-center">
+                    <span className="text-[10px] text-slate-500 block mb-1">止損防線 (-7%)</span>
+                    <span className="text-lg font-bold text-emerald-400">{sl}</span>
+                  </div>
+                </div>
+
+                {/* 數據網格 */}
+                <div className="grid grid-cols-4 gap-2 bg-[#0b0e14] p-4 rounded-xl mb-6 text-center">
+                  <div><span className="text-[10px] text-slate-500">持股</span><div className="font-bold">{s.qty}</div></div>
+                  <div><span className="text-[10px] text-slate-500">均價</span><div className="font-bold">{s.avgCost.toFixed(1)}</div></div>
+                  <div><span className="text-[10px] text-slate-500">未實現</span><div className={`font-bold ${isProfit ? 'text-red-400' : 'text-green-400'}`}>{unrealized}</div></div>
+                  <div><span className="text-[10px] text-slate-500">已落袋</span><div className="font-bold text-red-400">{Math.round(s.realizedProfit)}</div></div>
+                </div>
+
+                {/* 操作按鈕 */}
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => {
+                      const p = prompt("賣出單價?", currentP);
+                      const q = prompt(`賣出股數? (持股 ${s.qty})`);
+                      if(p && q) handleSell(s.id, parseFloat(p), parseInt(q));
+                    }}
+                    className="flex-1 bg-red-600/20 hover:bg-red-600/30 text-red-400 py-3 rounded-xl font-bold border border-red-600/30 transition-all"
+                  >
+                    賣出結利
+                  </button>
+                  <button 
+                    onClick={() => {
+                      const p = prompt("回補單價?", currentP);
+                      const q = prompt(`回補股數?`);
+                      if(p && q) handleBuyMore(s.id, parseFloat(p), parseInt(q));
+                    }}
+                    className="flex-1 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 py-3 rounded-xl font-bold border border-blue-600/30 transition-all"
+                  >
+                    低位回補
+                  </button>
+                  <button onClick={() => setStocks(stocks.filter(x => x.id !== s.id))} className="p-3 text-slate-600 hover:text-red-400"><Trash2 className="w-5 h-5"/></button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </main>
     </div>
   );
-};
-
-export default App;
+}
